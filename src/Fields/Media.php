@@ -2,9 +2,12 @@
 
 namespace Ebess\AdvancedNovaMediaLibrary\Fields;
 
+use Illuminate\Http\File;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Nova\Fields\Field;
 use Laravel\Nova\Http\Requests\NovaRequest;
+use Ramsey\Uuid\Uuid;
 use Spatie\MediaLibrary\HasMedia\HasMedia;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Illuminate\Support\Facades\Validator;
@@ -100,7 +103,10 @@ class Media extends Field
 
     protected function handleMedia(NovaRequest $request, $model, $attribute, $data)
     {
-        $remainingIds = $this->removeDeletedMedia($data, $model->getMedia($attribute));
+        $remainingIds = $this->removeDeletedMedia($data, $model->getMedia($attribute))->filter(function ($i) {
+            return $i;
+        });
+
         $newIds = $this->addNewMedia($request, $data, $model, $attribute);
         $this->setOrder($remainingIds->union($newIds)->sortKeys()->all());
     }
@@ -115,9 +121,20 @@ class Media extends Field
     {
         return collect($data)
             ->filter(function ($value) {
+                if (is_string($value)) {
+                    return str_contains($value, 'base64');
+                }
                 return $value instanceof UploadedFile;
-            })->map(function (UploadedFile $file, int $index) use ($request, $model, $collection) {
-                $media = $model->addMedia($file);
+            })->map(function ($file, int $index) use ($request, $model, $collection) {
+
+                if (is_string($file)) {
+                    $filePath = $this->storeBase64File($file);
+                    $file = new File($filePath);
+                    $media = $model->addMedia($file);
+                    Storage::delete($filePath);
+                } else {
+                    $media = $model->addMedia($file);
+                }
 
                 if (is_callable($this->setFileNameCallback)) {
                     $media->setFileName(
@@ -145,6 +162,9 @@ class Media extends Field
         $mediaItems = $model->getMedia($collection);
 
         collect($request->{$collection})->reject(function ($value) {
+            if (is_string($value)) {
+                return str_contains($value, 'base64');
+            }
             return $value instanceof UploadedFile;
         })->each(function (int $id, int $index) use ($request, $mediaItems, $collection) {
             if (!$media = $mediaItems->where('id', $id)->first()) {
@@ -210,7 +230,6 @@ class Media extends Field
 
                 return array_merge($this->serializeMedia($media), ['full_urls' => $urls]);
             });
-
         if ($data = $this->value->first()) {
             $thumbnailUrl = $data['full_urls'][$this->meta['thumbnail'] ?? 'default'];
             $this->withMeta(compact('thumbnailUrl'));
@@ -252,5 +271,30 @@ class Media extends Field
         $this->setNameCallback = $callback;
 
         return $this;
+    }
+
+    /**
+     * Store image fron base64 content
+     *
+     * @param string $file
+     *
+     * @return string
+     */
+    protected function storeBase64File($file)
+    {
+        $content = explode(';', $file);
+        $name = $content[0] ?? null;
+
+        $extention = explode('/', $name);
+        $extention = $extention[1] ?? 'png';
+
+        $uuid = Uuid::uuid4();
+        $fileName = $uuid . '.' . $extention;
+        $storagePath = "tmp/$fileName";
+
+        $fileContent = explode(',', $content[1]);
+        Storage::put($storagePath, base64_decode($fileContent[1]));
+
+        return storage_path("app/$storagePath");
     }
 }
